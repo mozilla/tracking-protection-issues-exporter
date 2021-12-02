@@ -63,6 +63,18 @@ yargs.scriptName('etp-issues-exporter')
         type: 'string',
         description: 'Name of the GitHub repository to download issues from.',
       })
+      .option('since', {
+        type: 'string',
+        description: 'Only fetch issues which have been updated since a given timestamp.',
+        default: 0,
+        coerce: ((dateStr) => new Date(dateStr)),
+      })
+      .check(({ since }) => {
+        if (!since) {
+          return true;
+        }
+        return (since instanceof Date) && !Number.isNaN(since.getTime());
+      })
       .demandOption(['ghAuthToken', 'ghRepoUser', 'ghRepoName'], 'Missing GitHub API config'),
     fetchIssues)
   .command('convert', 'Convert ETP GitHub issues into reports.',

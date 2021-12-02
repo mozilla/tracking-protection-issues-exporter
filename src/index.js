@@ -13,7 +13,7 @@ const ETPReport = require('./ETPReport.js');
 dotenv.config();
 
 async function importIssueCommentsToDB({
-  ghRepoUser, ghRepoName, dbDatabaseName, dbCollectionNameIssues,
+  ghRepoUser, ghRepoName, dbDatabaseName, dbCollectionNameIssues, since,
 }) {
   const issuesCollection = db.client.db(dbDatabaseName)
     .collection(dbCollectionNameIssues);
@@ -27,7 +27,7 @@ async function importIssueCommentsToDB({
   console.info(`Starting comment import for ${issueNumbers.length} issues out of ${totalIssueCount}.`);
 
   let countIssuesWithComments = 0;
-  let importedCount;
+  let importedCount = 0;
 
   for (let i = 0; i < issueNumbers.length; i += 1) {
     const number = issueNumbers[i];
@@ -37,6 +37,8 @@ async function importIssueCommentsToDB({
       repo: ghRepoName,
       issue_number: number,
       per_page: 100,
+      sort: 'created',
+      direction: 'desc',
     });
 
     // eslint-disable-next-line no-await-in-loop
@@ -44,18 +46,39 @@ async function importIssueCommentsToDB({
       if (!comments.length) {
         continue;
       }
+
+      // Filter comments which have been created after the given timestamp, if
+      // provided.
+      const dbComments = !since ? comments : comments.filter((comment) => {
+        const createdAt = new Date(comment.created_at);
+        return createdAt.getTime() >= since.getTime();
+      });
+
+      if (!dbComments.length) {
+        console.debug('No matching comments in date range');
+        break;
+      }
+
       // Update the issue document in the DB, inserting the comments.
       await issuesCollection.updateOne({ number }, {
         $push: {
           comment_list: {
-            $each: comments,
+            $each: dbComments,
           },
         },
       });
       countIssuesWithComments += 1;
-      importedCount += comments.length;
+      importedCount += dbComments.length;
 
-      console.info(`Imported ${comments.length} comments into the database.`);
+      console.info(`Imported ${dbComments.length} comments into the database.`);
+
+      // If there are fewer comments in dbComments it means we filtered some,
+      // because of time-range mismatch. Since the issues we iterate over are
+      // time sorted (descending) we can exit early.
+      if (dbComments.length < comments.length) {
+        console.debug('hit date bound!', since);
+        break;
+      }
     }
 
     // eslint-disable-next-line no-await-in-loop
@@ -74,7 +97,7 @@ async function fetchIssues(argv) {
   await Promise.all([api.init(argv), db.init(argv)]);
 
   const {
-    dbDatabaseName, dbCollectionNameIssues, ghRepoName, ghRepoUser,
+    dbDatabaseName, dbCollectionNameIssues, ghRepoName, ghRepoUser, since,
   } = argv;
 
   const issuesCollection = db.client.db(dbDatabaseName)
@@ -89,6 +112,8 @@ async function fetchIssues(argv) {
     owner: ghRepoUser,
     repo: ghRepoName,
     per_page: 100,
+    sort: 'updated',
+    direction: 'desc',
   });
 
   let importedCount = 0;
@@ -97,17 +122,38 @@ async function fetchIssues(argv) {
   // iterate through each response
   for await (const { data: issues } of iterator) {
     try {
+      // Filter issues which have been updated after the given timestamp, if
+      // provided. We have to use updated_at rather than created_at, because we
+      // want to include issues which have comments more recent than since.
+      let dbIssues = !since ? issues : issues.filter((issue) => {
+        const updatedAt = new Date(issue.updated_at);
+        return updatedAt.getTime() >= since.getTime();
+      });
+
+      if (!dbIssues.length) {
+        console.debug('No matching issues in date range');
+        break;
+      }
+
       // Add a comment_list field to each issue.
-      const dbIssues = issues.map((issue) => ({
+      dbIssues = dbIssues.map((issue) => ({
         ...issue,
         comment_list: [],
       }));
 
       const result = await issuesCollection.insertMany(dbIssues, { ordered: false });
-      console.debug(`Received ${dbIssues.length} issues from the API.`);
+      console.debug(`Received ${issues.length} issues from the API.`);
       console.info(`Imported ${result.insertedCount} issue into the database.`);
 
       importedCount += result.insertedCount;
+
+      // If there are fewer issues in dbIssues it means we filtered some,
+      // because of time-range mismatch. Since the issues we iterate over are
+      // time sorted (descending) we can exit early.
+      if (dbIssues.length < issues.length) {
+        console.debug('hit date bound!', since);
+        break;
+      }
     } catch (error) {
       console.error('Error while importing issues', error);
       failedImports += 1;
